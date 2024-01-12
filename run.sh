@@ -10,4 +10,4 @@
 # Commandes à soumettre :
 eval “$(conda shell.bash hook)”
 conda activate base
-python3 swinunetr_2gpu.py
+python3 unet_2gpu.py

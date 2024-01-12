@@ -25,14 +25,14 @@ from monai.transforms import (
 
 from monai.config import print_config
 from monai.metrics import DiceMetric
-from monai.networks.nets import SwinUNETR
+from monai.networks.nets import UNet
 
 from monai.data import (
     DataLoader,
     CacheDataset,
     decollate_batch,
     list_data_collate,
-    DistributedSampler
+    DistributedSampler,
 )
 
 import torch
@@ -48,18 +48,19 @@ print(root_dir)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-logger = WandbLogger(project="IPPMed", name="run_diceCEloss2")
-
+logger = WandbLogger(project="IPPMed", name="UNET_2gpu")
 
 class Net(pytorch_lightning.LightningModule):
     def __init__(self):
         super().__init__()
 
-        self._model = SwinUNETR(
-            img_size=(96, 96, 96),
-            in_channels=1,
-            out_channels=2,
-            feature_size=48,
+        self._model = UNet(
+            spatial_dims=3,  # 3D UNet
+            in_channels=1,   # Number of input channels
+            out_channels=2,  # Number of output channels
+            channels=(16, 32, 64, 128, 256), # Number of channels per layer
+            strides=(2, 2, 2, 2),            # Stride for each layer
+            num_res_units=2, # Number of residual units
         ).to(device)
 
         self.loss_function = DiceCELoss(to_onehot_y=True, softmax=True)
@@ -68,8 +69,8 @@ class Net(pytorch_lightning.LightningModule):
         self.dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
         self.best_val_dice = 0
         self.best_val_epoch = 0
-        self.max_epochs = 1300
-        self.check_val = 10
+        self.max_epochs = 5000
+        self.check_val = 20
         self.warmup_epochs = 20
         self.metric_values = []
         self.epoch_loss_values = []
@@ -78,8 +79,8 @@ class Net(pytorch_lightning.LightningModule):
 
     def forward(self, x):
         return self._model(x)
-    
-    def prepare_data(self):
+
+    def setup(self, stage=None):
         # prepare data
         path = "/home/ssd/ext-6344"
         dir = os.path.join(path, 'data_challenge', 'train')
@@ -93,6 +94,9 @@ class Net(pytorch_lightning.LightningModule):
         
         train_files, val_files = train_test_split(files, test_size=0.2, random_state=42)
         print(len(train_files))
+        
+        
+        
 
         train_transforms = Compose(
             [
@@ -123,7 +127,6 @@ class Net(pytorch_lightning.LightningModule):
                     image_key="image",
                     image_threshold=0,
                 ),
-                
                 RandFlipd(
                     keys=["image", "label"],
                     spatial_axis=[0],
@@ -176,14 +179,14 @@ class Net(pytorch_lightning.LightningModule):
         self.train_ds = CacheDataset(
             data=train_files,
             transform=train_transforms,
-            cache_num=26,
+            cache_num=225,
             cache_rate=1.0,
             num_workers=8,
         )
         self.val_ds = CacheDataset(
             data=val_files,
             transform=val_transforms,
-            cache_num=4,
+            cache_num=57,
             cache_rate=1.0,
             num_workers=8,
         )
@@ -197,6 +200,7 @@ class Net(pytorch_lightning.LightningModule):
             pin_memory=True,
             collate_fn=list_data_collate,
         )
+        print("train ok")
         return train_loader
 
     def val_dataloader(self):
@@ -205,7 +209,9 @@ class Net(pytorch_lightning.LightningModule):
             batch_size=1,
             shuffle=False,
             num_workers=4,
-            pin_memory=True)
+            pin_memory=True,
+        )
+        print("test ok")
         return val_loader
 
     def configure_optimizers(self):
@@ -216,13 +222,14 @@ class Net(pytorch_lightning.LightningModule):
         images, labels = (batch["image"].cuda(), batch["label"].cuda())
         output = self.forward(images)
         loss = self.loss_function(output, labels)
-        tensorboard_logs = {"train_loss": loss.item()}
         self.losses.append(loss.item())
-        return {"loss": loss, "log": tensorboard_logs}
+        return {"loss": loss}
 
     def on_train_epoch_end(self):
         avg_loss = sum(self.losses)/len(self.losses)
-        wandb.log({'avg_train_loss': avg_loss,"epoch":self.current_epoch})
+        self.logger.experiment.log({'avg_train_loss': avg_loss,
+                       'epoch': self.current_epoch
+                       })
         self.epoch_loss_values.append(avg_loss)
         print(f"Average training loss at epoch {self.current_epoch}: {avg_loss}")
         self.losses = []
@@ -252,9 +259,9 @@ class Net(pytorch_lightning.LightningModule):
         tensorboard_logs = {
             "val_dice": mean_val_dice,
             "val_loss": mean_val_loss,
-            "epoch":self.current_epoch
+            "epoch": self.current_epoch
         }
-        wandb.log(tensorboard_logs)
+        self.logger.experiment.log(tensorboard_logs)
         if mean_val_dice > self.best_val_dice:
             self.best_val_dice = mean_val_dice
             self.best_val_epoch = self.current_epoch
@@ -266,29 +273,29 @@ class Net(pytorch_lightning.LightningModule):
         )
         self.metric_values.append(mean_val_dice)
         self.validation_step_outputs.clear()  # free memory
-        return {"log": tensorboard_logs}
 
 
-##net = Net()
+net = Net()
 
 # set up checkpoints
-#checkpoint_callback = ModelCheckpoint(dirpath=root_dir,
-#                                      filename="diceCEloss2-{epoch}",
-#                                      verbose=True,
-#                                      every_n_epochs=1,
-#                                      save_top_k=-1
-#)
+checkpoint_callback = ModelCheckpoint(dirpath=root_dir,
+                                      filename="UNET-medium-{epoch}",
+                                      verbose=True,
+                                      every_n_epochs=5,
+                                      save_top_k=-1
+)
 
 # initialise Lightning's trainer.
-#trainer = pytorch_lightning.Trainer(
-#    precision = '16-mixed',
-#    devices=[0],
-#    max_epochs=net.max_epochs,
-#    check_val_every_n_epoch=net.check_val,
-#    callbacks=[checkpoint_callback],
-#    default_root_dir=root_dir,
-#    logger = logger
-#)
+trainer = pytorch_lightning.Trainer(
+    precision = '16-mixed',
+    devices=[0,1],
+    strategy='ddp',
+    max_epochs=net.max_epochs,
+    check_val_every_n_epoch=net.check_val,
+    callbacks=[checkpoint_callback],
+    default_root_dir=root_dir,
+    logger = logger
+)
 
 # train
-#trainer.fit(net)
+trainer.fit(net)
