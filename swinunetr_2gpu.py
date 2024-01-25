@@ -21,11 +21,15 @@ from monai.transforms import (
     ScaleIntensityRanged,
     Spacingd,
     RandRotate90d,
+    Invertd,
+    Lambda,
+    AsDiscreted
 )
 
 from monai.config import print_config
 from monai.metrics import DiceMetric
 from monai.networks.nets import SwinUNETR
+import pandas as pd 
 
 from monai.data import (
     DataLoader,
@@ -39,6 +43,7 @@ import torch
 import pytorch_lightning
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from sklearn.model_selection import train_test_split
+from evaluation_metric import submission_gen, score
 
 torch.set_float32_matmul_precision('medium')
 
@@ -48,7 +53,7 @@ print(root_dir)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-logger = WandbLogger(project="IPPMed", name="SwinUNETR_2gpu")
+logger = WandbLogger(project="IPPMed", name="SwinUNETR_scored")
 
 class Net(pytorch_lightning.LightningModule):
     def __init__(self):
@@ -154,7 +159,7 @@ class Net(pytorch_lightning.LightningModule):
         )
         val_transforms = Compose(
             [
-                LoadImaged(keys=["image", "label"]),
+                LoadImaged(keys=["image", "label"],image_only=False),
                 EnsureChannelFirstd(keys=["image", "label"]),
                 ScaleIntensityRanged(
                     keys=["image"],
@@ -173,7 +178,37 @@ class Net(pytorch_lightning.LightningModule):
                 ),
             ]
         )
+        
+        def extract_second_label(data):
+            # Assuming data["pred"] is of shape [batch_size, num_classes, ...]
+            # and we need to extract the second label (index 1)
+            data["second_label"] = data["pred"][1 , ...]
+            return data
+        
+        self.post_proc = Compose(
+            [
+                Invertd(
+                    keys="pred",
+                    transform=val_transforms,
+                    orig_keys="image",
+                    meta_keys="pred_meta_dict",
+                    orig_meta_keys="image_meta_dict",
+                    meta_key_postfix="meta_dict",
+                    nearest_interp=False,
+                    to_tensor=True,
+                ),
+                AsDiscreted(keys="pred", argmax=True, to_onehot=2),
+                Lambda(extract_second_label),
+                #KeepLargestConnectedComponentd(
+                #    keys="second_label",
+                #    applied_labels=[1],  # Update the applied_labels depending on your use case
+                #    independent=True,
+                #    connectivity=None
+                #),
+            ]
+        )
 
+        
         self.train_ds = CacheDataset(
             data=train_files,
             transform=train_transforms,
@@ -235,29 +270,63 @@ class Net(pytorch_lightning.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
+        metadata = batch['image_meta_dict']
+        pixdim = metadata['pixdim'][:, [1, 2, 3]][0]
+        name = metadata['filename_or_obj'][0]
         roi_size = (96, 96, 96)
         sw_batch_size = 4
-        outputs = sliding_window_inference(images, roi_size, sw_batch_size, self.forward)
-        loss = self.loss_function(outputs, labels)
-        outputs = [self.post_pred(i) for i in decollate_batch(outputs)]
+        batch["pred"] = sliding_window_inference(images, roi_size, sw_batch_size, self.forward)
+        loss = self.loss_function(batch["pred"], labels)
+        label =  [self.post_proc(i)["second_label"] for i in decollate_batch(batch)]
+        outputs = [self.post_pred(i) for i in decollate_batch(batch["pred"])]
         labels = [self.post_label(i) for i in decollate_batch(labels)]
+        df = submission_gen(label, pixdim, name)
+        
         self.dice_metric(y_pred=outputs, y=labels)
         d = {"val_loss": loss, "val_number": len(outputs)}
+        d.update(df)
         self.validation_step_outputs.append(d)
         return d
 
     def on_validation_epoch_end(self):
         val_loss, num_items = 0, 0
+        rle_list = []
+        recist_list = []
+        volume_list = []
+        patient_id_list = []
+        shape_list = []
         for output in self.validation_step_outputs:
             val_loss += output["val_loss"].sum().item()
             num_items += output["val_number"]
+            rle_list.append(output["rle"])
+            patient_id_list.append(output["id"])
+            recist_list.append(output["recist"])
+            volume_list.append(output["volume"])
+            shape_list.append(output["data_shape"])
         mean_val_dice = self.dice_metric.aggregate().item()
         self.dice_metric.reset()
         mean_val_loss = torch.tensor(val_loss / num_items)
+        
+
+        
+        df = pd.DataFrame(
+            {
+                "id": patient_id_list,
+                "rle": rle_list,
+                "recist": recist_list,
+                "volume": volume_list,
+                "data_shape": shape_list,
+            }
+        )
+        scor, seg_error, recist_error, vol_error = score(df)
         tensorboard_logs = {
             "val_dice": mean_val_dice,
             "val_loss": mean_val_loss,
-            "epoch": self.current_epoch
+            "epoch": self.current_epoch,
+            "score": scor,
+            "seg_error": seg_error,
+            "recist_error": recist_error,
+            "vol_error": vol_error
         }
         self.logger.experiment.log(tensorboard_logs)
         if mean_val_dice > self.best_val_dice:
@@ -277,7 +346,7 @@ net = Net()
 
 # set up checkpoints
 checkpoint_callback = ModelCheckpoint(dirpath=root_dir,
-                                      filename="SwinUNETR-medium-{epoch}",
+                                      filename="SwinUNETR-{epoch}",
                                       verbose=True,
                                       every_n_epochs=5,
                                       save_top_k=-1

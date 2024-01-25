@@ -154,28 +154,28 @@ class Net(pytorch_lightning.LightningModule):
         val_transforms = Compose(
             [
                 LoadImaged(keys=["image", "label"]),
-                EnsureChannelFirstd(keys=["image", "label"]),
-                ScaleIntensityRanged(
-                    keys=["image"],
-                    a_min=-175,
-                    a_max=250,
-                    b_min=0.0,
-                    b_max=1.0,
-                    clip=True,
-                ),
-                CropForegroundd(keys=["image", "label"], source_key="image"),
-                Orientationd(keys=["image", "label"], axcodes="RAS"),
-                Spacingd(
-                    keys=["image", "label"],
-                    pixdim=(1.5, 1.5, 2.0),
-                    mode=("bilinear", "nearest"),
-                ),
+                #EnsureChannelFirstd(keys=["image", "label"]),
+                #ScaleIntensityRanged(
+                #    keys=["image"],
+                #    a_min=-175,
+                #    a_max=250,
+                #    b_min=0.0,
+                #    b_max=1.0,
+                #    clip=True,
+                #),
+                #CropForegroundd(keys=["image", "label"], source_key="image"),
+                #Orientationd(keys=["image", "label"], axcodes="RAS"),
+                #Spacingd(
+                #    keys=["image", "label"],
+                #    pixdim=(1.5, 1.5, 2.0),
+                #   mode=("bilinear", "nearest"),
+                #),
             ]
         )
 
         self.train_ds = CacheDataset(
             data=train_files,
-            transform=train_transforms,
+            #transform=train_transforms,
             cache_num=26,
             cache_rate=1.0,
             num_workers=8,
