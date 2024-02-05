@@ -72,7 +72,7 @@ class Net(pytorch_lightning.LightningModule):
         self.dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
         self.best_val_dice = 0
         self.best_val_epoch = 0
-        self.max_epochs = 5000
+        self.max_epochs = 1000
         self.check_val = 20
         self.warmup_epochs = 20
         self.metric_values = []
