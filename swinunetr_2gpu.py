@@ -53,7 +53,7 @@ print(root_dir)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-logger = WandbLogger(project="IPPMed", name="SwinUNETR_scored")
+logger = WandbLogger(project="IPPMed", name="SwinUNETR")
 
 class Net(pytorch_lightning.LightningModule):
     def __init__(self):
@@ -95,7 +95,7 @@ class Net(pytorch_lightning.LightningModule):
         
         files = [{"image": img, "label": lbl} for img, lbl in zip(image_paths, label_paths)]
         
-        train_files, val_files = train_test_split(files, test_size=0.2, random_state=42)
+        train_files, val_files = train_test_split(files, test_size=0.05, random_state=42)
         print(len(train_files))
         
         
@@ -212,14 +212,14 @@ class Net(pytorch_lightning.LightningModule):
         self.train_ds = CacheDataset(
             data=train_files,
             transform=train_transforms,
-            cache_num=225,
+            cache_num=276,
             cache_rate=1.0,
             num_workers=8,
         )
         self.val_ds = CacheDataset(
             data=val_files,
             transform=val_transforms,
-            cache_num=57,
+            cache_num=15,
             cache_rate=1.0,
             num_workers=8,
         )
